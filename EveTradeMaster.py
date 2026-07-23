@@ -12,7 +12,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Налог с продаж (Accounting skill)
 TAX_COEFF = 0.954  # 100% - 4.6%
 
-# Группировка ресурсов для модуля "Чертежи"
+# Группировка ресурсов для сводки (Чертежи)
 RESOURCE_GROUPS = {
     "Минералы": ["Tritanium", "Pyerite", "Mexallon", "Isogen", "Nocxium", "Zydrine", "Megacyte", "Morphite"],
     "Планетарка": ["Coolant", "Construction Blocks", "Consumer Electronics", "Enriched Uranium", "Robotics", "Nanites", "Mechanical Parts"],
@@ -145,15 +145,16 @@ def get_bom_logic(name, needed, summary, stock, depth=0):
     for m in mats:
         mname = st.session_state.cache_name.get(str(m['typeid']), str(m['typeid']))
         mqty = float(m['quantity']) * runs
-        if mname.lower() != name.lower(): get_bom_logic(mname, mqty, summary, stock, depth + 1)
+        if mname.lower() != name.lower():
+            get_bom_logic(mname, mqty, summary, stock, depth + 1)
 
 # --- ИНТЕРФЕЙС ---
-st.set_page_config(page_title="EVE Master v13.0", layout="wide")
+st.set_page_config(page_title="EVE Master v13.1", layout="wide")
 st.title("🛰️ EVE Online Master: Trade & Industry")
 
 t1, t2, t3, t4 = st.tabs(["Арбитраж", "Срез цен", "Чертежи", "Глобальный поиск"])
 
-# --- TAB 1 ---
+# --- TAB 1: Арбитраж ---
 with t1:
     c1, c2, c3 = st.columns(3)
     with c1: f_hub = st.selectbox("Из системы (Sell)", list(HUBS.keys()), index=0, key="m1f")
@@ -180,6 +181,7 @@ with t1:
                         tid = o['type_id']
                         if tid in s_data:
                             if tid not in b_data or o['price'] > b_data[tid]['p']: b_data[tid] = {'p': o['price'], 'q': o['volume_remain']}
+                if len(d) < 1000: break
             res = []
             for tid, b in b_data.items():
                 s = s_data[tid]
@@ -191,9 +193,15 @@ with t1:
                 get_names_batch([x[0] for x in res])
                 df = pd.DataFrame(res, columns=["id", "Цена Sell", "Кол S", "Цена Buy", "Кол B", "Профит %", "Прибыль ISK"])
                 df["Товар"] = df["id"].apply(lambda x: st.session_state.cache_name.get(str(x), str(x)))
-                st.dataframe(df[["Товар", "Цена Sell", "Кол S", "Цена Buy", "Кол B", "Профит %", "Прибыль ISK"]].sort_values("Профит %", ascending=False), use_container_width=True)
+                st.dataframe(df[["Товар", "Цена Sell", "Кол S", "Цена Buy", "Кол B", "Профит %", "Прибыль ISK"]].sort_values("Прибыль ISK", ascending=False), 
+                             column_config={
+                                 "Цена Sell": st.column_config.NumberColumn(format="%.2f"),
+                                 "Цена Buy": st.column_config.NumberColumn(format="%.2f"),
+                                 "Профит %": st.column_config.NumberColumn(format="%.1f%%"),
+                                 "Прибыль ISK": st.column_config.NumberColumn(format="%.0f")
+                             }, use_container_width=True)
 
-# --- TAB 2 ---
+# --- TAB 2: Срез цен ---
 with t2:
     it_n = st.text_input("Предмет", "Tritanium")
     if st.button("Показать цены"):
@@ -205,9 +213,9 @@ with t2:
                     st.markdown(f"**{name}**")
                     r = requests.get(f"https://esi.evetech.net/latest/markets/{info['region_id']}/orders/", params={'order_type': 'sell', 'type_id': it_id}).json()
                     f = sorted([o for o in r if o['location_id'] == info['station_id']], key=lambda x: x['price'])[:3]
-                    for o in f: st.write(f"{o['price']:,.2f} ISK")
+                    for o in f: st.write(f"{o['price']:,.2f} ISK ({o['volume_remain']:,} шт)")
 
-# --- TAB 3 ---
+# --- TAB 3: Чертежи ---
 with t3:
     bp_n = st.text_input("Чертеж", "Claymore")
     if st.button("Анализ"):
@@ -215,7 +223,7 @@ with t3:
         with st.spinner("Считаю..."): get_bom_logic(bp_n, 1.0, sm, sk)
         if sm:
             for grp, mbs in RESOURCE_GROUPS.items():
-                fd = [[k, f"{int(v):,}"] for k, v in sm.items() if k in mbs]
+                fd = [[k, int(v)] for k, v in sm.items() if k in mbs]
                 if fd:
                     st.subheader(grp)
                     st.table(pd.DataFrame(fd, columns=["Ресурс", "Всего"]))
@@ -227,7 +235,7 @@ with t4:
         bar = st.progress(0); st_txt = st.empty()
         hb = {}
         for i, (hn, info) in enumerate(HUBS.items()):
-            st_txt.text(f"Хаб {hn}: сбор бай-ордеров...")
+            st_txt.text(f"Хаб {hn}: сбор спроса...")
             d = requests.get(f"https://esi.evetech.net/latest/markets/{info['region_id']}/orders/", params={'order_type': 'buy'}).json()
             for o in d:
                 if o['system_id'] == info['system_id']:
@@ -237,15 +245,15 @@ with t4:
         
         res_l = []
         for i, (rid, rname) in enumerate(HIGHSEC_REGIONS.items()):
-            st_txt.text(f"Регион {rname}: сканирование...")
+            st_txt.text(f"Регион {rname}: поиск...")
             for p in range(1, 12):
                 d = requests.get(f"https://esi.evetech.net/latest/markets/{rid}/orders/", params={'order_type': 'sell', 'page': p}).json()
                 if not d or 'error' in d: break
                 for o in d:
-                    t = o['type_id']
-                    if t in hb:
-                        # ПРОВЕРКА БЕЗОПАСНОСТИ СИСТЕМЫ (Фильтр 0.5+)
-                        if get_security_status(o['system_id']) >= 0.45:
+                    # СТРОГИЙ ФИЛЬТР HIGH-SEC (0.45+)
+                    if get_security_status(o['system_id']) >= 0.45:
+                        t = o['type_id']
+                        if t in hb:
                             diff = ((hb[t]['p'] - o['price'])/o['price'])*100
                             if diff >= m4_pct:
                                 prf = (hb[t]['p'] * TAX_COEFF - o['price']) * min(o['volume_remain'], hb[t]['q'])
@@ -256,13 +264,19 @@ with t4:
         if res_l:
             st_txt.text("Загрузка названий...")
             ids_all = [x[0] for x in res_l] + [x[1] for x in res_l]
-            get_names_batch(ids_all) # ПРИНУДИТЕЛЬНЫЙ РЕЗОЛВ ИМЕН
+            get_names_batch(ids_all)
             
             final_df = pd.DataFrame(res_l, columns=["tid", "sid", "Кол S", "Цена Sell", "Цена Buy Хаб", "Кол B", "Хаб", "Профит %", "Прибыль ISK"])
             final_df["Товар"] = final_df["tid"].apply(lambda x: st.session_state.cache_name.get(str(x), str(x)))
             final_df["Система"] = final_df["sid"].apply(lambda x: st.session_state.cache_name.get(str(x), str(x)))
             
-            st.dataframe(final_df[["Товар", "Система", "Кол S", "Цена Sell", "Цена Buy Хаб", "Кол B", "Хаб", "Профит %", "Прибыль ISK"]].sort_values("Прибыль ISK", ascending=False), use_container_width=True)
+            st.dataframe(final_df[["Товар", "Система", "Кол S", "Цена Sell", "Цена Buy Хаб", "Кол B", "Хаб", "Профит %", "Прибыль ISK"]].sort_values("Прибыль ISK", ascending=False), 
+                         column_config={
+                             "Цена Sell": st.column_config.NumberColumn(format="%.2f"),
+                             "Цена Buy Хаб": st.column_config.NumberColumn(format="%.2f"),
+                             "Профит %": st.column_config.NumberColumn(format="%.1f%%"),
+                             "Прибыль ISK": st.column_config.NumberColumn(format="%.0f")
+                         }, use_container_width=True)
             st_txt.text("Готово!")
         else: st.info("Нет сделок.")
         bar.progress(100)
