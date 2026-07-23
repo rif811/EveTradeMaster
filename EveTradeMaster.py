@@ -9,12 +9,11 @@ import urllib3
 # --- НАСТРОЙКИ ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Цвета
 COLOR_SUCCESS = "#2ecc71"
 COLOR_WORKING = "#f39c12"
 COLOR_ERROR   = "#e74c3c"
 
-# Группировка для сводки ресурсов (Чертежи)
+# Группировка ресурсов для сводки (Чертежи)
 RESOURCE_GROUPS = {
     "Минералы": ["Tritanium", "Pyerite", "Mexallon", "Isogen", "Nocxium", "Zydrine", "Megacyte", "Morphite"],
     "Планетарка": ["Coolant", "Construction Blocks", "Consumer Electronics", "Enriched Uranium", "Robotics", "Nanites", "Mechanical Parts"],
@@ -79,13 +78,15 @@ def get_id(name):
     return None
 
 def get_names_batch(ids):
-    ids_to_fetch = [int(tid) for tid in ids if str(tid) not in st.session_state.cache_name]
+    """Метод пакетной загрузки имен."""
+    ids_to_fetch = list(set([int(tid) for tid in ids if str(tid) not in st.session_state.cache_name]))
     if ids_to_fetch:
         try:
             for i in range(0, len(ids_to_fetch), 1000):
                 chunk = ids_to_fetch[i:i+1000]
-                r = requests.post("https://esi.evetech.net/latest/universe/names/", json=chunk, timeout=15).json()
-                for item in r: st.session_state.cache_name[str(item['id'])] = item['name']
+                r = requests.post("https://esi.evetech.net/latest/universe/names/", json=chunk, timeout=20).json()
+                for item in r: 
+                    st.session_state.cache_name[str(item['id'])] = item['name']
             save_json_persistent("names_db.json", st.session_state.cache_name)
         except: pass
     return st.session_state.cache_name
@@ -93,7 +94,9 @@ def get_names_batch(ids):
 def fetch_recipe(tid):
     fp = os.path.join(DB_PATH, f"{tid}.txt")
     if os.path.exists(fp):
-        with open(fp, "r") as f: d = json.load(f); return d['mats'], d['yld']
+        try:
+            with open(fp, "r") as f: d = json.load(f); return d['mats'], d['yld']
+        except: pass
     try:
         h = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(f"https://www.fuzzwork.co.uk/blueprint/api/blueprint.php?typeid={tid}", timeout=10, verify=False, headers=h).json()
@@ -102,9 +105,14 @@ def fetch_recipe(tid):
             k = next((x for x in ['1','11'] if str(x) in am or x in am), next(iter(am.keys())) if am else None)
             if k:
                 mats = am[str(k)] if str(k) in am else am[k]
-                yld = int(r['activityProducts'][str(k)][0]['quantity']) if 'activityProducts' in r and str(k) in r['activityProducts'] else 1
-                with open(fp, "w") as f: json.dump({'mats': mats, 'yld': yld}, f)
-                return mats, yld
+                yld = 1
+                if 'activityProducts' in r:
+                    ap = r['activityProducts']
+                    act_key = str(k) if str(k) in ap else (k if k in ap else None)
+                    if act_key: yld = int(ap[act_key][0]['quantity'])
+                if mats:
+                    with open(fp, "w") as f: json.dump({'mats': mats, 'yld': yld}, f)
+                    return mats, yld
     except: pass
     return None, 0
 
@@ -123,7 +131,8 @@ def get_bom_logic(name, needed, summary, stock, depth=0):
     to_produce = needed - in_stock
     stock[name] = 0.0
     
-    tid = get_id(f"{name} Blueprint") or get_id(name)
+    # Пытаемся найти чертеж
+    tid = get_id(f"{name} Blueprint") or get_id(f"{name} Reaction Formula") or get_id(name)
     mats, yld = fetch_recipe(tid) if tid else (None, 0)
     
     if not mats or yld <= 0:
@@ -133,8 +142,8 @@ def get_bom_logic(name, needed, summary, stock, depth=0):
     runs = math.ceil(to_produce / yld)
     stock[name] = stock.get(name, 0.0) + (runs * yld - to_produce)
     
-    mat_ids = [m['typeid'] for m in mats]
-    get_names_batch(mat_ids)
+    # Загружаем имена компонентов заранее
+    get_names_batch([m['typeid'] for m in mats])
     
     for m in mats:
         mname = st.session_state.cache_name.get(str(m['typeid']), str(m['typeid']))
@@ -143,34 +152,35 @@ def get_bom_logic(name, needed, summary, stock, depth=0):
             get_bom_logic(mname, mqty, summary, stock, depth + 1)
 
 # --- ИНТЕРФЕЙС ---
+st.set_page_config(page_title="EVE Industry Master Web", layout="wide")
+st.title("🛰️ EVE Online: Industry & Global Trade Master")
 
-st.set_page_config(page_title="EVE Master Web", layout="wide")
-st.title("🛰️ EVE Online: Industry & Trade Master")
-
-tab1, tab2, tab3, tab4 = st.tabs(["Межхабовая торговля", "Срез цен", "Чертежи", "Глобальный поиск"])
+t1, t2, t3, t4 = st.tabs(["Арбитраж", "Срез цен", "Чертежи", "Глобальный поиск"])
 
 # --- TAB 1: Арбитраж ---
-with tab1:
+with t1:
     c1, c2, c3 = st.columns(3)
-    with c1: f_hub = st.selectbox("Из хаба (Sell)", list(HUBS.keys()), index=0)
-    with c2: t_hub = st.selectbox("В хаб (Buy)", list(HUBS.keys()), index=1)
-    with c3: pct = st.number_input("Мин. % профита", 1, 1000, 40)
+    with c1: f_hub = st.selectbox("Из хаба (Sell)", list(HUBS.keys()), index=0, key="m1_from")
+    with c2: t_hub = st.selectbox("В хаб (Buy)", list(HUBS.keys()), index=1, key="m1_to")
+    with c3: pct_val = st.number_input("Мин. % профита", 1, 1000, 40, key="m1_pct")
     
-    if st.button("Запустить Арбитраж"):
+    if st.button("Поиск Арбитража"):
         h1, h2 = HUBS[f_hub], HUBS[t_hub]
-        with st.spinner("Сканирование рынков..."):
-            # Sell
+        with st.spinner("Загрузка рынков..."):
+            # Sell data
             s_data = {}
-            for p in range(1, 10):
+            for p in range(1, 15):
                 d = requests.get(f"https://esi.evetech.net/latest/markets/{h1['region_id']}/orders/", params={'order_type': 'sell', 'page': p}).json()
                 if not d or 'error' in d: break
                 for o in d:
                     if o['location_id'] == h1['station_id']:
                         tid = o['type_id']
                         if tid not in s_data or o['price'] < s_data[tid]['p']: s_data[tid] = {'p': o['price'], 'q': o['volume_remain']}
-            # Buy
+                if len(d) < 1000: break
+            
+            # Buy data
             b_data = {}
-            for p in range(1, 10):
+            for p in range(1, 15):
                 d = requests.get(f"https://esi.evetech.net/latest/markets/{h2['region_id']}/orders/", params={'order_type': 'buy', 'page': p}).json()
                 if not d or 'error' in d: break
                 for o in d:
@@ -178,93 +188,109 @@ with tab1:
                         tid = o['type_id']
                         if tid in s_data:
                             if tid not in b_data or o['price'] > b_data[tid]['p']: b_data[tid] = {'p': o['price'], 'q': o['volume_remain']}
+                if len(d) < 1000: break
             
-            res = []
+            final_res = []
             for tid, b in b_data.items():
                 s = s_data[tid]
                 diff = ((b['p'] - s['p'])/s['p'])*100
-                if diff >= pct:
-                    res.append([tid, s['p'], s['q'], b['p'], b['q'], diff])
+                if diff >= pct_val:
+                    final_res.append([tid, s['p'], s['q'], b['p'], b['q'], diff])
             
-            if res:
-                get_names_batch([x[0] for x in res])
-                final_df = []
-                for r in res:
-                    final_df.append([st.session_state.cache_name.get(str(r[0]), r[0]), r[1], r[2], r[3], r[4], f"{r[5]:.1f}%"])
-                df = pd.DataFrame(final_df, columns=["Товар", "Цена S1", "Кол S1", "Цена B2", "Кол B2", "Профит %"])
-                st.dataframe(df.sort_values("Профит %", ascending=False), use_container_width=True)
-            else: st.info("Сделок не найдено.")
+            if final_res:
+                get_names_batch([x[0] for x in final_res])
+                table_data = []
+                for r in final_res:
+                    name = st.session_state.cache_name.get(str(r[0]), str(r[0]))
+                    table_data.append([name, f"{r[1]:,.2f}", r[2], f"{r[3]:,.2f}", r[4], f"{r[5]:,.1f}%"])
+                st.dataframe(pd.DataFrame(table_data, columns=["Товар", "Цена Sell", "Кол Sell", "Цена Buy", "Кол Buy", "Профит %"]), use_container_width=True)
+            else: st.info("Выгодных сделок не найдено.")
 
 # --- TAB 2: Срез цен ---
-with tab2:
-    item_query = st.text_input("Введите название товара для среза", "Tritanium")
-    if st.button("Показать цены"):
-        tid = get_id(item_query)
-        if tid:
+with t2:
+    item_n = st.text_input("Название предмета", "Tritanium")
+    if st.button("Показать цены хабов"):
+        it_id = get_id(item_n)
+        if it_id:
             cols = st.columns(5)
-            for i, (hub_name, info) in enumerate(HUBS.items()):
+            for i, (name, info) in enumerate(HUBS.items()):
                 with cols[i]:
-                    st.subheader(hub_name)
-                    r = requests.get(f"https://esi.evetech.net/latest/markets/{info['region_id']}/orders/", params={'order_type': 'sell', 'type_id': tid}).json()
+                    st.markdown(f"**{name}**")
+                    r = requests.get(f"https://esi.evetech.net/latest/markets/{info['region_id']}/orders/", params={'order_type': 'sell', 'type_id': it_id}).json()
                     f = sorted([o for o in r if o['location_id'] == info['station_id']], key=lambda x: x['price'])[:3]
-                    for o in f:
-                        st.write(f"**{o['price']:,.2f}** ({o['volume_remain']:,} шт)")
-        else: st.error("Товар не найден.")
+                    for o in f: st.write(f"{o['price']:,.2f} ISK")
+        else: st.error("Предмет не найден.")
 
 # --- TAB 3: Чертежи ---
-with tab3:
-    bp_input = st.text_input("Название чертежа (напр. Claymore)", "")
-    if st.button("Анализ состава"):
-        summary, stock = {}, {}
-        with st.spinner("Глубокий анализ..."):
-            get_bom_logic(bp_input, 1.0, summary, stock)
-        if summary:
-            for grp, items in RESOURCE_GROUPS.items():
-                g_data = [[k, f"{int(v):,}"] for k, v in summary.items() if k in items]
-                if g_data:
-                    st.subheader(grp)
-                    st.table(pd.DataFrame(g_data, columns=["Материал", "Всего"]))
+with t3:
+    bp_q = st.text_input("Название чертежа", "Claymore")
+    if st.button("Глубокий анализ"):
+        sum_m, stock_m = {}, {}
+        with st.spinner("Расчет иерархии..."):
+            get_bom_logic(bp_q, 1.0, sum_m, stock_m)
+        if sum_m:
+            for group, members in RESOURCE_GROUPS.items():
+                filtered = [[k, f"{int(v):,}"] for k, v in sum_m.items() if k in members]
+                if filtered:
+                    st.subheader(group)
+                    st.table(pd.DataFrame(filtered, columns=["Ресурс", "Всего"]))
         else: st.error("Рецепт не найден.")
 
 # --- TAB 4: Глобальный поиск ---
-with tab4:
-    g_pct = st.slider("Минимальный профит %", 10, 100, 40)
-    if st.button("Начать Глобальное сканирование"):
+with t4:
+    m4_pct = st.slider("Мин. профит %", 10, 100, 40, key="m4_pct_slider")
+    if st.button("Начать Глобальный скан"):
         bar = st.progress(0)
-        hb = {}
-        # Хабы
+        status = st.empty()
+        
+        hb_buys = {}
+        # Сбор хабов
         for i, (hn, info) in enumerate(HUBS.items()):
-            bar.progress((i+1)*5 // 5)
+            bar.progress((i+1)*5 // 14)
+            status.text(f"Хаб {hn}: сбор данных...")
             d = requests.get(f"https://esi.evetech.net/latest/markets/{info['region_id']}/orders/", params={'order_type': 'buy'}).json()
             for o in d:
                 if o['system_id'] == info['system_id']:
-                    t = o['type_id']
-                    if t not in hb or o['price'] > hb[t]['p']: hb[t] = {'p': o['price'], 'h': hn}
+                    tid = o['type_id']
+                    if tid not in hb_buys or o['price'] > hb_buys[tid]['p']: hb_buys[tid] = {'p': o['price'], 'h': hn}
         
-        # Регионы
-        res_l = []
+        res_list = []
+        # Сбор регионов
         for i, (rid, rname) in enumerate(HIGHSEC_REGIONS.items()):
             bar.progress(5 + (i+1)*10)
-            st.write(f"Сканирую {rname}...")
+            status.text(f"Регион {rname}: сканирование...")
             for p in range(1, 10):
                 d = requests.get(f"https://esi.evetech.net/latest/markets/{rid}/orders/", params={'order_type': 'sell', 'page': p}).json()
                 if not d or 'error' in d: break
                 for o in d:
-                    t = o['type_id']
-                    if t in hb:
-                        diff = ((hb[t]['p'] - o['price'])/o['price'])*100
-                        if diff >= g_pct:
-                            prof = (hb[t]['p']*0.958 - o['price']) * o['volume_remain']
-                            if prof > 0:
-                                res_l.append([t, o['system_id'], o['volume_remain'], o['price'], hb[t]['p'], hb[t]['h'], diff, prof])
+                    tid = o['type_id']
+                    if tid in hb_buys:
+                        diff = ((hb_buys[tid]['p'] - o['price'])/o['price'])*100
+                        if diff >= m4_pct:
+                            res_list.append([tid, o['system_id'], o['volume_remain'], o['price'], hb_buys[tid]['p'], hb_buys[tid]['h'], diff])
                 if len(d) < 1000: break
         
-        if res_l:
-            all_ids = [x[0] for x in res_l] + [x[1] for x in res_l]
-            get_names_batch(all_ids)
-            f_data = []
-            for r in res_l:
-                f_data.append([st.session_state.cache_name.get(str(r[0]), r[0]), st.session_state.cache_name.get(str(r[1]), r[1]), r[2], r[3], r[4], r[5], f"{r[6]:.1f}%", f"{int(r[7]):,} ISK"])
-            st.dataframe(pd.DataFrame(f_data, columns=["Товар", "Система", "Кол-во", "Sell", "Buy", "Хаб", "%", "Прибыль"]))
-        else: st.info("Ничего не найдено.")
+        if res_list:
+            status.text("Загрузка названий...")
+            # СОБИРАЕМ ВСЕ ID (товары + системы)
+            ids_to_resolve = []
+            for row in res_list:
+                ids_to_resolve.append(row[0]) # Товар
+                ids_to_resolve.append(row[1]) # Система
+            
+            # ПРИНУДИТЕЛЬНЫЙ ПЕРЕВОД В ИМЕНА
+            get_names_batch(ids_to_resolve)
+            
+            final_table = []
+            for r in res_list:
+                item_name = st.session_state.cache_name.get(str(r[0]), str(r[0]))
+                sys_name = st.session_state.cache_name.get(str(r[1]), str(r[1]))
+                final_table.append([item_name, sys_name, r[2], f"{r[3]:,.2f}", f"{r[4]:,.2f}", r[5], f"{r[6]:.1f}%"])
+            
+            df = pd.DataFrame(final_table, columns=["Товар", "Система", "Кол-во", "Sell", "Buy Хаб", "Хаб", "%"])
+            st.dataframe(df.sort_values("%", ascending=False), use_container_width=True)
+            status.text("Готово!")
+        else:
+            st.info("Ничего не найдено.")
+            status.text("Поиск завершен.")
         bar.progress(100)
